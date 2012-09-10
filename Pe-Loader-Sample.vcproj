@@ -189,6 +189,10 @@
 				>
 			</File>
 			<File
+				RelativePath=".\src\PEB.h"
+				>
+			</File>
+			<File
 				RelativePath=".\src\PeLdr.h"
 				>
 			</File>

@@ -1,21 +1,26 @@
-#include <windows.h>
-
-#include "Debug.h"
 #include "PeLdr.h"
+#include "Debug.h"
 
 static
-INT ShowUsage(int argc, char **argv)
+INT ShowUsage()
 {
 	printf("-- PE Loader Sample --\n\n");
-	printf("%s [PE-File]\n", argv[0]);
+	printf("PeLdr [PE-File]\n");
 	printf("\n");
 
 	return 0;
 }
 
-int main(int argc, char **argv)
+int wmain(int argc, wchar_t *argv[])
 {
-	if(argc < 2)
-		return ShowUsage(argc, argv);
+	PE_LDR_PARAM peLdr;
 
+	if(argc < 2)
+		return ShowUsage();
+
+	PeLdrInit(&peLdr);
+	PeLdrSetExecutablePath(&peLdr, argv[1]);
+	PeLdrStart(&peLdr);
+
+	return 0;
 }
