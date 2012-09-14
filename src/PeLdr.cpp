@@ -167,6 +167,7 @@ BOOL PeLdrExecuteEP(PE_LDR_PARAM *pe)
 {
 	DWORD	dwOld;
 	DWORD	dwEP;
+	_PPEB	peb;
 
 	// TODO: Fix permission as per section flags
 	if(!VirtualProtect((LPVOID) pe->dwMapBase, pe->pNtHeaders->OptionalHeader.SizeOfImage,
@@ -174,6 +175,11 @@ BOOL PeLdrExecuteEP(PE_LDR_PARAM *pe)
 		DMSG("Failed to change mapping protection");
 		return FALSE;
 	}
+
+	
+	DMSG("Fixing Image Base address in PEB")
+	peb = (_PPEB)__readfsdword(0x30);
+	peb->lpImageBaseAddress = (LPVOID) pe->dwMapBase;
 
 	dwEP = pe->dwMapBase + pe->pNtHeaders->OptionalHeader.AddressOfEntryPoint;
 	DMSG("Executing Entry Point: 0x%08x", dwEP);
