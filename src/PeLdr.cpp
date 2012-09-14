@@ -4,60 +4,38 @@
 
 #include <strsafe.h>
 
+#ifndef NTSTATUS
+#define NTSTATUS	LONG
+#endif
+
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS  ((NTSTATUS)0x00000000L)
+#endif
+
 #pragma warning(disable: 4995)
-#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='x86' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 static
-BOOL PeLdrExecuteEP(PE_LDR_PARAM *pe)
+BOOL PeLdrApplyImageRelocations(DWORD dwImageBase, UINT_PTR iRelocOffset)
 {
-	DWORD	dwOld;
-	DWORD	dwEP;
-
-	// TODO: Fix permission as per section flags
-	if(!VirtualProtect((LPVOID) pe->dwMapBase, pe->pNtHeaders->OptionalHeader.SizeOfImage,
-		PAGE_EXECUTE_READWRITE, &dwOld)) {
-		DMSG("Failed to change mapping protection");
-		return FALSE;
-	}
-
-	dwEP = pe->dwMapBase + pe->pNtHeaders->OptionalHeader.AddressOfEntryPoint;
-	DMSG("Executing Entry Point: 0x%08x", dwEP);
-
-	__asm {
-		mov eax, dwEP
-		call eax
-		int 3
-	}
-
-	return TRUE;
-}
-
-static
-BOOL PeLdrApplyRelocations(PE_LDR_PARAM *pe)
-{
-	UINT_PTR					iRelocOffset;
+	PIMAGE_DOS_HEADER			pDosHeader;
+	PIMAGE_NT_HEADERS			pNtHeaders;
 	DWORD						x;
 	DWORD						dwTmp;
 	PIMAGE_BASE_RELOCATION		pBaseReloc;
 	PIMAGE_RELOC				pReloc;
 
-	if(pe->dwMapBase == pe->pNtHeaders->OptionalHeader.ImageBase) {
-		DMSG("Relocation not required");
-		return TRUE;
-	}
+	DMSG("Applying Image Relocation (Base: 0x%08x RelocOffset: 0x%08x)",
+		dwImageBase, iRelocOffset);
 
-	if(!pe->pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size) {
-		DMSG("PE required relocation but no relocatiom information found");
-		return FALSE;
-	}
+	pDosHeader = (PIMAGE_DOS_HEADER) dwImageBase;
+	pNtHeaders = (PIMAGE_NT_HEADERS) (dwImageBase + pDosHeader->e_lfanew);
 
-	iRelocOffset = pe->dwMapBase - pe->pNtHeaders->OptionalHeader.ImageBase;
 	pBaseReloc = (PIMAGE_BASE_RELOCATION) 
-		(pe->dwMapBase + 
-		pe->pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress);
+		(dwImageBase + 
+		pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress);
 
 	while(pBaseReloc->SizeOfBlock) {
-		x = pe->dwMapBase + pBaseReloc->VirtualAddress;
+		x = dwImageBase + pBaseReloc->VirtualAddress;
 		dwTmp = (pBaseReloc->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(IMAGE_RELOC);
 		pReloc = (PIMAGE_RELOC) (((DWORD) pBaseReloc) + sizeof(IMAGE_BASE_RELOCATION));
 
@@ -96,6 +74,139 @@ BOOL PeLdrApplyRelocations(PE_LDR_PARAM *pe)
 }
 
 static
+BOOL PeLdrNeedSelfRelocation(PE_LDR_PARAM *pe)
+{
+	DWORD				dwMyBase;
+	PIMAGE_DOS_HEADER	pMyDosHeader;
+	PIMAGE_NT_HEADERS	pMyNtHeaders;
+
+	DMSG("Checking for self relocation");
+
+	dwMyBase = (DWORD) GetModuleHandle(NULL);
+	if(!dwMyBase) {
+		EMSG("Failed to get our loaded address");
+		return FALSE;
+	}
+	
+	pMyDosHeader = (PIMAGE_DOS_HEADER) dwMyBase;
+	pMyNtHeaders = (PIMAGE_NT_HEADERS) (dwMyBase + pMyDosHeader->e_lfanew);
+
+	if(pMyNtHeaders->Signature != IMAGE_NT_SIGNATURE) {
+		EMSG("Failed to find our own headers");
+		return FALSE;
+	}
+
+	DMSG("MyBase: 0x%08x MySize: %d", dwMyBase, pMyNtHeaders->OptionalHeader.SizeOfImage);
+
+	if((pe->pNtHeaders->OptionalHeader.ImageBase >= dwMyBase) &&
+		(pe->pNtHeaders->OptionalHeader.ImageBase < (dwMyBase + pMyNtHeaders->OptionalHeader.SizeOfImage)))
+	{
+		DMSG("Self relocation required");
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+static
+BOOL PeLdrRelocateAndContinue(PE_LDR_PARAM *pe, VOID *pContFunc, VOID *pParam)
+{
+	PIMAGE_DOS_HEADER	pMyDosHeader;
+	PIMAGE_NT_HEADERS	pMyNtHeaders;
+	DWORD				dwNewBase;
+	DWORD				dwMyBase;
+	DWORD				dwAddr;
+	UINT_PTR			iRelocOffset;
+
+	DMSG("Relocating loader image (Continue Function: 0x%08x)", (DWORD) pContFunc);
+
+	dwMyBase = (DWORD) GetModuleHandle(NULL);
+	if(!dwMyBase) {
+		EMSG("Failed to get our loaded address");
+		return FALSE;
+	}
+	
+	pMyDosHeader = (PIMAGE_DOS_HEADER) dwMyBase;
+	pMyNtHeaders = (PIMAGE_NT_HEADERS) (dwMyBase + pMyDosHeader->e_lfanew);
+
+	dwNewBase = (DWORD) VirtualAlloc(NULL, pMyNtHeaders->OptionalHeader.SizeOfImage + 1,
+		MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+	if(!dwNewBase) {
+		EMSG("Failed to allocate memory for self relocation");
+		return FALSE;
+	}
+
+	DMSG("New Loader Base: 0x%08x", dwNewBase);
+	pe->dwLoaderRelocatedBase = dwNewBase;
+
+	CopyMemory((VOID*) dwNewBase, (VOID*) dwMyBase,
+		pMyNtHeaders->OptionalHeader.SizeOfImage);
+
+	iRelocOffset = dwNewBase - dwMyBase;
+	if(!PeLdrApplyImageRelocations(dwNewBase, iRelocOffset)) {
+		EMSG("Failed to apply relocations on relocated image");
+		return FALSE;
+	}
+
+	dwAddr = ((DWORD) pContFunc) - dwMyBase;
+	dwAddr += dwNewBase;
+
+	DMSG("Jumping to relocated image (Relocated Continue Function: 0x%08x)", dwAddr);
+	__asm {
+		mov eax, pParam
+		push eax
+		mov eax, dwAddr
+		call eax
+	}
+
+	return TRUE;
+}
+
+static
+BOOL PeLdrExecuteEP(PE_LDR_PARAM *pe)
+{
+	DWORD	dwOld;
+	DWORD	dwEP;
+
+	// TODO: Fix permission as per section flags
+	if(!VirtualProtect((LPVOID) pe->dwMapBase, pe->pNtHeaders->OptionalHeader.SizeOfImage,
+		PAGE_EXECUTE_READWRITE, &dwOld)) {
+		DMSG("Failed to change mapping protection");
+		return FALSE;
+	}
+
+	dwEP = pe->dwMapBase + pe->pNtHeaders->OptionalHeader.AddressOfEntryPoint;
+	DMSG("Executing Entry Point: 0x%08x", dwEP);
+
+	__asm {
+		mov eax, dwEP
+		call eax
+		int 3
+	}
+
+	return TRUE;
+}
+
+static
+BOOL PeLdrApplyRelocations(PE_LDR_PARAM *pe)
+{
+	UINT_PTR	iRelocOffset;
+
+	if(pe->dwMapBase == pe->pNtHeaders->OptionalHeader.ImageBase) {
+		DMSG("Relocation not required");
+		return TRUE;
+	}
+
+	if(!pe->pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size) {
+		DMSG("PE required relocation but no relocatiom information found");
+		return FALSE;
+	}
+
+	iRelocOffset = pe->dwMapBase - pe->pNtHeaders->OptionalHeader.ImageBase;
+	return PeLdrApplyImageRelocations(pe->dwMapBase, iRelocOffset);
+}
+
+static
 BOOL PeLdrProcessIAT(PE_LDR_PARAM *pe)
 {
 	BOOL						ret = FALSE;
@@ -125,7 +236,7 @@ BOOL PeLdrProcessIAT(PE_LDR_PARAM *pe)
 			DMSG("Loading Library and processing Imports: %s", (CHAR*) pLibName);
 
 			if(pImportDesc->ForwarderChain != -1) {
-				DMSG("FIXME: Cannot handle Import Forwarding currently");
+				DMSG("FIXME: Cannot handle Import Forwarding");
 				flError = 1;
 				break;
 			}
@@ -191,9 +302,7 @@ BOOL PeLdrProcessIAT(PE_LDR_PARAM *pe)
 static
 BOOL PeLdrMapImage(PE_LDR_PARAM *pe)
 {
-	DWORD						dwProcessBase;
 	DWORD						i;
-	_PPEB						peb;
 	MEMORY_BASIC_INFORMATION	mi;
 	PIMAGE_SECTION_HEADER		pSectionHeader;
 	BOOL						ret = FALSE;
@@ -203,25 +312,9 @@ BOOL PeLdrMapImage(PE_LDR_PARAM *pe)
 	if(!pe)
 		return ret;
 
-	DMSG("Mapping PE File");
-
-	pe->pDosHeader = (PIMAGE_DOS_HEADER) pe->dwImage;
-	if(pe->pDosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
-		DMSG("DOS Signature invalid");
-		return ret;
-	}
-
-	pe->pNtHeaders = (PIMAGE_NT_HEADERS) 
-		(PIMAGE_NT_HEADERS)(((DWORD) pe->dwImage) + pe->pDosHeader->e_lfanew);
-	if(pe->pNtHeaders->Signature != IMAGE_NT_SIGNATURE) {
-		DMSG("NT Signature mismatch");
-		return ret;
-	}
-
-	peb = (_PPEB)__readfsdword(0x30);
-	dwProcessBase = (DWORD) peb->lpImageBaseAddress;
-
-	DMSG("Current process base: 0x%08x", dwProcessBase);
+	DMSG("Mapping Target PE File");
+	DMSG("Loader Base Orig: 0x%08x New: 0x%08x", 
+		pe->dwLoaderBase, pe->dwLoaderRelocatedBase);
 
 	NtUnmapViewOfSection = 
 		(NTSTATUS (NTAPI *)(HANDLE, LPVOID))
@@ -235,7 +328,7 @@ BOOL PeLdrMapImage(PE_LDR_PARAM *pe)
 			pe->pNtHeaders->OptionalHeader.SizeOfImage);
 
 		// Find the size of our mapping
-		i = dwProcessBase;
+		i = pe->dwLoaderBase;
 		while(VirtualQuery((LPVOID) i, &mi, sizeof(mi))) {
 			if(mi.State == MEM_FREE)
 				break;
@@ -243,10 +336,19 @@ BOOL PeLdrMapImage(PE_LDR_PARAM *pe)
 			i += mi.RegionSize;
 		}
 
-		if((pe->pNtHeaders->OptionalHeader.ImageBase >= dwProcessBase) && 
+		if((pe->pNtHeaders->OptionalHeader.ImageBase >= pe->dwLoaderBase) && 
 			(pe->pNtHeaders->OptionalHeader.ImageBase < i)) {
-			EMSG("Cannot load PE in same base address as the loader");
-			// TODO: Relocate ourself so as to load Target PE in same address
+			if(NtUnmapViewOfSection) {
+				DMSG("Unmapping original loader mapping");
+				if(NtUnmapViewOfSection(GetCurrentProcess(), (VOID*) pe->dwLoaderBase) == STATUS_SUCCESS) {
+					pe->dwMapBase = (DWORD) VirtualAlloc((LPVOID) pe->pNtHeaders->OptionalHeader.ImageBase,
+										pe->pNtHeaders->OptionalHeader.SizeOfImage + 1,
+										MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+				}
+				else {
+					EMSG("Failed to unmap original loader mapping");
+				}
+			}
 		}
 		else {
 			pe->dwMapBase = (DWORD) VirtualAlloc((LPVOID) pe->pNtHeaders->OptionalHeader.ImageBase,
@@ -259,6 +361,8 @@ BOOL PeLdrMapImage(PE_LDR_PARAM *pe)
 		}
 
 		if(!pe->dwMapBase) {
+			DMSG("Attempting to allocate new memory");
+
 			if(!pe->pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size) {
 				EMSG("Failed to map required memory address, need relocation to continue");
 				break;
@@ -307,6 +411,7 @@ BOOL PeLdrLoadImage(PE_LDR_PARAM *pe)
 	DWORD	dwTmp;
 	DWORD	dwOff;
 	BOOL	ret = FALSE;
+	_PPEB	peb;
 
 	if(!pe)
 		goto out;
@@ -343,6 +448,21 @@ BOOL PeLdrLoadImage(PE_LDR_PARAM *pe)
 		goto out;
 	}
 
+	pe->pDosHeader = (PIMAGE_DOS_HEADER) pe->dwImage;
+	if(pe->pDosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+		DMSG("DOS Signature invalid");
+		goto out;
+	}
+
+	pe->pNtHeaders = (PIMAGE_NT_HEADERS)(((DWORD) pe->dwImage) + pe->pDosHeader->e_lfanew);
+	if(pe->pNtHeaders->Signature != IMAGE_NT_SIGNATURE) {
+		DMSG("NT Signature mismatch");
+		goto out;
+	}
+
+	peb = (_PPEB)__readfsdword(0x30);
+	pe->dwLoaderBase = (DWORD) peb->lpImageBaseAddress;
+
 	ret = TRUE;
 
 out:
@@ -352,10 +472,9 @@ out:
 	return ret;
 }
 
-BOOL PeLdrStart(PE_LDR_PARAM *pe)
+static
+BOOL PeLdrRunImage(PE_LDR_PARAM *pe)
 {
-	if(!PeLdrLoadImage(pe))
-		return FALSE;
 	if(!PeLdrMapImage(pe))
 		return FALSE;
 	if(!PeLdrProcessIAT(pe))
@@ -366,6 +485,17 @@ BOOL PeLdrStart(PE_LDR_PARAM *pe)
 		return FALSE;
 
 	return TRUE;
+}
+
+BOOL PeLdrStart(PE_LDR_PARAM *pe)
+{
+	if(!PeLdrLoadImage(pe))
+		return FALSE;
+
+	if(PeLdrNeedSelfRelocation(pe))
+		return PeLdrRelocateAndContinue(pe, (VOID*) PeLdrRunImage, (VOID*) pe);
+	else
+		return PeLdrRunImage(pe);
 }
 
 BOOL PeLdrSetExecutablePath(PE_LDR_PARAM *pe, TCHAR *pExecutable)

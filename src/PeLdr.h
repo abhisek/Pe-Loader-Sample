@@ -13,6 +13,9 @@ typedef struct {
 	DWORD					dwImage;
 	DWORD					dwImageSizeOnDisk;
 
+	DWORD					dwLoaderBase;
+	DWORD					dwLoaderRelocatedBase;
+
 	DWORD					dwMapBase;
 
 } PE_LDR_PARAM;

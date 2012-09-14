@@ -3,6 +3,7 @@ PE Loader Sample
 
 In memory execution of PE executables:
 
+ * Self Relocation
  * Memory Mapping
  * IAT Processing
  * Relocation
@@ -15,8 +16,11 @@ TODO:
  * Handle Import Forwarding
  * Bound Imports
  * Is it possible to relocate a PE if relocation table is not included? Hack++?
+ * Most Important: Documentation of PE Loading Process
 	
 Thanks
 -------
 
-Special thanks to Stephen Fewer of Harmony Security for Reflective DLL Injection paper and implementation. The IAT processing and Relocation code in this project is taken from ReflectiveDLL Loader implementation.
+* Special thanks to Stephen Fewer of Harmony Security for Reflective DLL Injection paper and implementation. The IAT processing and Relocation code in this project is taken from ReflectiveDLL Loader implementation.
+
+* sincoder for ideas on Self Relocation.
