@@ -74,6 +74,104 @@ BOOL PeLdrApplyImageRelocations(DWORD dwImageBase, UINT_PTR iRelocOffset)
 }
 
 static
+BOOL PeLdrProcessIAT(DWORD dwImageBase)
+{
+	BOOL						ret = FALSE;
+	PIMAGE_DOS_HEADER			pDosHeader;
+	PIMAGE_NT_HEADERS			pNtHeaders;
+	PIMAGE_IMPORT_DESCRIPTOR	pImportDesc;
+	PIMAGE_THUNK_DATA			pThunkData;
+	PIMAGE_THUNK_DATA			pThunkDataOrig;
+	PIMAGE_IMPORT_BY_NAME		pImportByName;
+	PIMAGE_EXPORT_DIRECTORY		pExportDir;
+	DWORD						flError = 0;
+	DWORD						dwTmp;
+	BYTE						*pLibName;
+	HMODULE						hMod;
+
+	DMSG("Processing IAT (Image Base: 0x%08x)", dwImageBase);
+
+	pDosHeader = (PIMAGE_DOS_HEADER) dwImageBase;
+	pNtHeaders = (PIMAGE_NT_HEADERS) (dwImageBase + pDosHeader->e_lfanew);
+
+	do {
+		pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)(dwImageBase +
+			pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
+
+		if(!pImportDesc) {
+			DMSG("IAT not found");
+			break;
+		}
+
+		while((pImportDesc->Name != 0) && (!flError)) {
+			pLibName = (BYTE*) (dwImageBase + pImportDesc->Name);
+			DMSG("Loading Library and processing Imports: %s", (CHAR*) pLibName);
+
+			if(pImportDesc->ForwarderChain != -1) {
+				DMSG("FIXME: Cannot handle Import Forwarding");
+				//flError = 1;
+				//break;
+			}
+
+			hMod = LoadLibraryA((CHAR*) pLibName);
+			if(!hMod) {
+				DMSG("Failed to load library: %s", pLibName);
+				flError = 1;
+				break;
+			}
+
+			pThunkData = (PIMAGE_THUNK_DATA)(dwImageBase + pImportDesc->FirstThunk);
+			if(pImportDesc->Characteristics == 0)
+				/* Borland compilers doesn't produce Hint Table */
+				pThunkDataOrig = pThunkData;
+			else
+				/* Hint Table */
+				pThunkDataOrig = (PIMAGE_THUNK_DATA)(dwImageBase + pImportDesc->Characteristics);
+
+			while(pThunkDataOrig->u1.AddressOfData != 0) {
+				if(pThunkDataOrig->u1.Ordinal & IMAGE_ORDINAL_FLAG) {
+					/* Import via. Export Ordinal */
+					PIMAGE_DOS_HEADER		_dos;
+					PIMAGE_NT_HEADERS		_nt;
+
+					_dos = (PIMAGE_DOS_HEADER) hMod;
+					_nt = (PIMAGE_NT_HEADERS) (((DWORD) hMod) + _dos->e_lfanew);
+
+					pExportDir = (PIMAGE_EXPORT_DIRECTORY) 
+						(((DWORD) hMod) + _nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+					dwTmp = (((DWORD) hMod) + pExportDir->AddressOfFunctions) + (((IMAGE_ORDINAL(pThunkDataOrig->u1.Ordinal) - pExportDir->Base)) * sizeof(DWORD));
+					dwTmp = ((DWORD) hMod) + *((DWORD*) dwTmp);
+
+					pThunkData->u1.Function = dwTmp;
+				}
+				else {
+					pImportByName = (PIMAGE_IMPORT_BY_NAME)
+						(dwImageBase + pThunkDataOrig->u1.AddressOfData);
+					pThunkData->u1.Function = (DWORD) GetProcAddress(hMod, (LPCSTR) pImportByName->Name);
+
+					if(!pThunkData->u1.Function) {
+						DMSG("Failed to resolve API: %s!%s", 
+							(CHAR*)pLibName, (CHAR*)pImportByName->Name);
+						flError = 1;
+						break;
+					}
+				}
+
+				pThunkDataOrig++;
+				pThunkData++;
+			}
+
+			pImportDesc++;
+		}
+
+		if(!flError)
+			ret = TRUE;
+
+	} while(0);
+	return ret;
+}
+
+static
 BOOL PeLdrNeedSelfRelocation(PE_LDR_PARAM *pe)
 {
 	DWORD				dwMyBase;
@@ -142,11 +240,18 @@ BOOL PeLdrRelocateAndContinue(PE_LDR_PARAM *pe, VOID *pContFunc, VOID *pParam)
 	CopyMemory((VOID*) dwNewBase, (VOID*) dwMyBase,
 		pMyNtHeaders->OptionalHeader.SizeOfImage);
 
+	if(!PeLdrProcessIAT(dwNewBase)) {
+		EMSG("Failed to process IAT for relocated image");
+		return FALSE;
+	}
+
 	iRelocOffset = dwNewBase - dwMyBase;
 	if(!PeLdrApplyImageRelocations(dwNewBase, iRelocOffset)) {
 		EMSG("Failed to apply relocations on relocated image");
 		return FALSE;
 	}
+
+	pe->dwLoaderBase = dwNewBase;
 
 	dwAddr = ((DWORD) pContFunc) - dwMyBase;
 	dwAddr += dwNewBase;
@@ -177,7 +282,7 @@ BOOL PeLdrExecuteEP(PE_LDR_PARAM *pe)
 	}
 
 	
-	DMSG("Fixing Image Base address in PEB")
+	DMSG("Fixing Image Base address in PEB");
 	peb = (_PPEB)__readfsdword(0x30);
 	peb->lpImageBaseAddress = (LPVOID) pe->dwMapBase;
 
@@ -210,99 +315,6 @@ BOOL PeLdrApplyRelocations(PE_LDR_PARAM *pe)
 
 	iRelocOffset = pe->dwMapBase - pe->pNtHeaders->OptionalHeader.ImageBase;
 	return PeLdrApplyImageRelocations(pe->dwMapBase, iRelocOffset);
-}
-
-static
-BOOL PeLdrProcessIAT(PE_LDR_PARAM *pe)
-{
-	BOOL						ret = FALSE;
-	PIMAGE_IMPORT_DESCRIPTOR	pImportDesc;
-	PIMAGE_THUNK_DATA			pThunkData;
-	PIMAGE_THUNK_DATA			pThunkDataOrig;
-	PIMAGE_IMPORT_BY_NAME		pImportByName;
-	PIMAGE_EXPORT_DIRECTORY		pExportDir;
-	DWORD						flError = 0;
-	DWORD						dwTmp;
-	BYTE						*pLibName;
-	HMODULE						hMod;
-
-	DMSG("Processing IAT");
-
-	do {
-		pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)(pe->dwMapBase +
-			pe->pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
-
-		if(!pImportDesc) {
-			DMSG("IAT not found");
-			break;
-		}
-
-		while((pImportDesc->Name != 0) && (!flError)) {
-			pLibName = (BYTE*) (pe->dwMapBase + pImportDesc->Name);
-			DMSG("Loading Library and processing Imports: %s", (CHAR*) pLibName);
-
-			if(pImportDesc->ForwarderChain != -1) {
-				DMSG("FIXME: Cannot handle Import Forwarding");
-				flError = 1;
-				break;
-			}
-
-			hMod = LoadLibraryA((CHAR*) pLibName);
-			if(!hMod) {
-				DMSG("Failed to load library: %s", pLibName);
-				flError = 1;
-				break;
-			}
-
-			pThunkData = (PIMAGE_THUNK_DATA)(pe->dwMapBase + pImportDesc->FirstThunk);
-			if(pImportDesc->Characteristics == 0)
-				/* Borland compilers doesn't produce Hint Table */
-				pThunkDataOrig = pThunkData;
-			else
-				/* Hint Table */
-				pThunkDataOrig = (PIMAGE_THUNK_DATA)(pe->dwMapBase + pImportDesc->Characteristics);
-
-			while(pThunkDataOrig->u1.AddressOfData != 0) {
-				if(pThunkDataOrig->u1.Ordinal & IMAGE_ORDINAL_FLAG) {
-					/* Import via. Export Ordinal */
-					PIMAGE_DOS_HEADER		_dos;
-					PIMAGE_NT_HEADERS		_nt;
-
-					_dos = (PIMAGE_DOS_HEADER) hMod;
-					_nt = (PIMAGE_NT_HEADERS) (((DWORD) hMod) + _dos->e_lfanew);
-
-					pExportDir = (PIMAGE_EXPORT_DIRECTORY) 
-						(((DWORD) hMod) + _nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-					dwTmp = (((DWORD) hMod) + pExportDir->AddressOfFunctions) + (((IMAGE_ORDINAL(pThunkDataOrig->u1.Ordinal) - pExportDir->Base)) * sizeof(DWORD));
-					dwTmp = ((DWORD) hMod) + *((DWORD*) dwTmp);
-
-					pThunkData->u1.Function = dwTmp;
-				}
-				else {
-					pImportByName = (PIMAGE_IMPORT_BY_NAME)
-						(pe->dwMapBase + pThunkDataOrig->u1.AddressOfData);
-					pThunkData->u1.Function = (DWORD) GetProcAddress(hMod, (LPCSTR) pImportByName->Name);
-
-					if(!pThunkData->u1.Function) {
-						DMSG("Failed to resolve API: %s!%s", 
-							(CHAR*)pLibName, (CHAR*)pImportByName->Name);
-						flError = 1;
-						break;
-					}
-				}
-
-				pThunkDataOrig++;
-				pThunkData++;
-			}
-
-			pImportDesc++;
-		}
-
-		if(!flError)
-			ret = TRUE;
-
-	} while(0);
-	return ret;
 }
 
 static
@@ -356,22 +368,23 @@ BOOL PeLdrMapImage(PE_LDR_PARAM *pe)
 				}
 			}
 		}
-		else {
-			pe->dwMapBase = (DWORD) VirtualAlloc((LPVOID) pe->pNtHeaders->OptionalHeader.ImageBase,
-				pe->pNtHeaders->OptionalHeader.SizeOfImage + 1,
-				MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+		
+		pe->dwMapBase = (DWORD) VirtualAlloc((LPVOID) pe->pNtHeaders->OptionalHeader.ImageBase,
+			pe->pNtHeaders->OptionalHeader.SizeOfImage + 1,
+			MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
-			if(!pe->dwMapBase)
-				EMSG("Failed to allocate PE ImageBase: 0x%08x", 
-					pe->pNtHeaders->OptionalHeader.ImageBase);
-		}
+		if(!pe->dwMapBase)
+			EMSG("Failed to allocate PE ImageBase: 0x%08x", 
+				pe->pNtHeaders->OptionalHeader.ImageBase);
 
 		if(!pe->dwMapBase) {
 			DMSG("Attempting to allocate new memory");
 
 			if(!pe->pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size) {
 				EMSG("Failed to map required memory address, need relocation to continue");
-				break;
+				EMSG("[WARNING] Forcing re-use of mapped memory");
+				
+				pe->dwMapBase = (DWORD) pe->pNtHeaders->OptionalHeader.ImageBase;
 			}
 			else {
 				pe->dwMapBase = (DWORD) VirtualAlloc(NULL, 
@@ -412,47 +425,41 @@ BOOL PeLdrMapImage(PE_LDR_PARAM *pe)
 static 
 BOOL PeLdrLoadImage(PE_LDR_PARAM *pe)
 {
-	HANDLE	hFile = NULL;
-	DWORD	dwSize;
-	DWORD	dwTmp;
-	DWORD	dwOff;
+	HANDLE	hFile	= NULL;
+	HANDLE	hMap	= NULL;
 	BOOL	ret = FALSE;
 	_PPEB	peb;
 
 	if(!pe)
 		goto out;
 
-	DMSG("Reading PE File");
+	DMSG("Mapping PE File");
 
-	hFile = CreateFile(pe->pTargetPath, GENERIC_READ, 
-		FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-	if(hFile == INVALID_HANDLE_VALUE) {
-		DMSG("Failed to open PE File");
-		goto out;
+	if(!pe->bLoadFromBuffer) {
+		DMSG("Creating Map View of File");
+
+		hFile = CreateFile(pe->pTargetPath, GENERIC_READ, 
+			FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+		if(hFile == INVALID_HANDLE_VALUE) {
+			DMSG("Failed to open PE File");
+			goto out;
+		}
+
+		pe->dwImageSizeOnDisk = GetFileSize(hFile, NULL);
+		hMap = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+		if(hMap == NULL) {
+			DMSG("Failed to create file mapping for PE File");
+			goto out;
+		}
+
+		pe->dwImage = (DWORD) MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+		if(!pe->dwImage) {
+			DMSG("Failed to obtain a map view of PE File");
+			goto out;
+		}
 	}
 
-	pe->dwImageSizeOnDisk = dwSize = GetFileSize(hFile, NULL);
-	pe->dwImage = (DWORD) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize + 1);
-	if(!pe->dwImage) {
-		DMSG("Failed to allocate memory for PE File");
-		goto out;
-	}
-
-	dwTmp = dwOff = 0;
-	while(dwSize) {
-		ReadFile(hFile, (LPVOID)(pe->dwImage + dwOff), dwSize, &dwTmp, NULL);
-
-		if(!dwTmp)
-			break;
-
-		dwOff += dwTmp;
-		dwSize -= dwTmp;
-	}
-
-	if(dwSize) {
-		DMSG("Failed to read PE File");
-		goto out;
-	}
+	DMSG("Map View of File created");
 
 	pe->pDosHeader = (PIMAGE_DOS_HEADER) pe->dwImage;
 	if(pe->pDosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
@@ -472,6 +479,8 @@ BOOL PeLdrLoadImage(PE_LDR_PARAM *pe)
 	ret = TRUE;
 
 out:
+	if(hMap)
+		CloseHandle(hMap);
 	if(hFile)
 		CloseHandle(hFile);
 
@@ -483,7 +492,7 @@ BOOL PeLdrRunImage(PE_LDR_PARAM *pe)
 {
 	if(!PeLdrMapImage(pe))
 		return FALSE;
-	if(!PeLdrProcessIAT(pe))
+	if(!PeLdrProcessIAT(pe->dwMapBase))
 		return FALSE;
 	if(!PeLdrApplyRelocations(pe))
 		return FALSE;
@@ -502,6 +511,18 @@ BOOL PeLdrStart(PE_LDR_PARAM *pe)
 		return PeLdrRelocateAndContinue(pe, (VOID*) PeLdrRunImage, (VOID*) pe);
 	else
 		return PeLdrRunImage(pe);
+}
+
+BOOL PeLdrSetExecutableBuffer(PE_LDR_PARAM *pe, PVOID pExecutable, DWORD dwLen)
+{
+	if(!pe)
+		return FALSE;
+
+	pe->dwImageSizeOnDisk = dwLen;
+	pe->dwImage = (DWORD) pExecutable;
+	pe->bLoadFromBuffer = TRUE;
+
+	return TRUE;
 }
 
 BOOL PeLdrSetExecutablePath(PE_LDR_PARAM *pe, TCHAR *pExecutable)

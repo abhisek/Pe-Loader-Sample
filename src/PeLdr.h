@@ -10,6 +10,7 @@ typedef struct {
 	PIMAGE_DOS_HEADER		pDosHeader;
 	PIMAGE_NT_HEADERS		pNtHeaders;
 
+	BOOLEAN					bLoadFromBuffer;
 	DWORD					dwImage;
 	DWORD					dwImageSizeOnDisk;
 
@@ -22,6 +23,7 @@ typedef struct {
 
 VOID PeLdrInit(PE_LDR_PARAM *pe);
 BOOL PeLdrSetExecutablePath(PE_LDR_PARAM *pe, TCHAR *pExecutable);
+BOOL PeLdrSetExecutableBuffer(PE_LDR_PARAM *pe, PVOID pExecutable, DWORD dwLen);
 BOOL PeLdrStart(PE_LDR_PARAM *pe);
 
 #endif
