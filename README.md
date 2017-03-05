@@ -1,8 +1,12 @@
 Simple runtime C++ crypter.
 
+---------------------------------------------------------------------------------------------
+
 The XOR-Cipher-Executable program accepts a windows executable as argument. It will run a simple XOR cipher to encrypt the binary and then output it as 'crypt.exe'.
 
 The Pe-Loader-Sample originally comes from https://github.com/abhisek/Pe-Loader-Sample. It has been modified from the original to take a binary file from it's resources and reverse the XOR cipher from the previous program. The program then takes this unencrypted executable image in memory and proceeds with the original code to map the PE file into memory, perform relocation fix ups, resolve imports, etc, as in abhisek's original code.
+
+---------------------------------------------------------------------------------------------
 
 Instructions:
 
