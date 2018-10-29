@@ -1,26 +1,27 @@
-PE Loader Sample
-=================
+Simple runtime C++ crypter.
 
-In memory execution of PE executables:
+---------------------------------------------------------------------------------------------
 
- * Self Relocation
- * Memory Mapping
- * IAT Processing
- * Relocation
- * Control Transfer
-	
-This project aims to implement a complete PE Loader capable of loading all PE and PE+ executables. The current version should be considered as a PoC only as it does not handle all practical cases.
+This crypter POC is accompanied by this tutorial: https://www.codeproject.com/Articles/1174823/Cplusplus-Runtime-Crypter
 
-TODO:
+---------------------------------------------------------------------------------------------
 
- * Handle Import Forwarding
- * Bound Imports
- * Is it possible to relocate a PE if relocation table is not included? Hack++?
- * Most Important: Documentation of PE Loading Process
-	
-Thanks
--------
+The XOR-Cipher-Executable program accepts a windows executable as argument. It will run a simple XOR cipher to encrypt the binary and then output it as 'crypt.exe'.
 
-* Special thanks to Stephen Fewer of Harmony Security for Reflective DLL Injection paper and implementation. The IAT processing and Relocation code in this project is taken from ReflectiveDLL Loader implementation.
+The Pe-Loader-Sample originally comes from https://github.com/abhisek/Pe-Loader-Sample. It has been modified from the original to take a binary file from it's resources and reverse the XOR cipher from the previous program. The program then takes this unencrypted executable image in memory and proceeds with the original code to map the PE file into memory, perform relocation fix ups, resolve imports, etc, as in abhisek's original code.
 
-* sincoder for ideas on Self Relocation.
+---------------------------------------------------------------------------------------------
+
+Instructions:
+
+XOR-Cipher-Executable
+
+Run the executable you would like to crypt through the encrypt.exe program (note that this project is based on abhisek's PE-Loader, not all executables guaranteed to work work). The resulting output will be an encrypted version of your executable called "crypt.exe".
+
+Pe-Loader-Sample
+
+Now load the Pe-Loader project in Visual Studio, where the encrypted program must be added as a resource. Go to View->Solution Explorer, which shows the project solution files in the tab on the left. Now right click on the project folder, and go to Add->Resource->Import(Find File) and set type as 'RCDATA', and then compile the project. When executed, the program should take the resource, decrypt it and then execute directly from process memory.
+
+Changes to Pe-Loader-Sample:
+
+Removed arguments from main(), removed the PeLdrSetExecutablePath and PeLdrSetExecutableBuffer functions, and heavily modified the PeLdrLoadImage to load executable into buffer from resource and not disk, and then XOR decrypt the executable before sending the unencrypted binary image to be loaded into and executed from memory (never touches disk) by the rest of the program, which is unaltered, same as the original. For original Pe-Loader code, see github link above.
